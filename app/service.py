@@ -25,12 +25,26 @@ class Settings(BaseSettings):
 
     app_env: str = "local"
     azure_tenant_id: str = ""
-    azure_client_id: str = ""  # API audience
+    azure_client_id: str = ""  # the API's app (client) id
+    azure_api_audience: str = ""  # override; defaults to api://<client_id>
+    azure_issuer: str = ""  # override; defaults to the v2.0 issuer for the tenant
 
     @property
     def require_auth(self) -> bool:
         """Real Entra JWT validation is enforced when tenant + client are set."""
         return bool(self.azure_tenant_id and self.azure_client_id)
+
+    @property
+    def entra_audience(self) -> str:
+        return self.azure_api_audience or f"api://{self.azure_client_id}"
+
+    @property
+    def entra_issuer(self) -> str:
+        return self.azure_issuer or f"https://login.microsoftonline.com/{self.azure_tenant_id}/v2.0"
+
+    @property
+    def jwks_uri(self) -> str:
+        return f"https://login.microsoftonline.com/{self.azure_tenant_id}/discovery/v2.0/keys"
 
 
 @lru_cache
@@ -64,21 +78,36 @@ def get_identity(request: Request) -> Identity:
     return Identity(user=user, roles=roles)
 
 
-def _validate_entra_jwt(token: str) -> dict:  # pragma: no cover - requires Entra + PyJWT
-    """Validate a Microsoft Entra ID access token (signature, audience, issuer)."""
-    import jwt
+@lru_cache
+def _jwks_client():  # pragma: no cover - network; cached across requests
     from jwt import PyJWKClient
 
+    return PyJWKClient(get_settings().jwks_uri)
+
+
+def _get_signing_key(token: str):
+    """Resolve the RSA public key for a token from Entra's JWKS (by `kid`).
+
+    Isolated so tests can inject a key without hitting the network.
+    """
+    return _jwks_client().get_signing_key_from_jwt(token).key
+
+
+def _validate_entra_jwt(token: str) -> dict:
+    """Validate a Microsoft Entra ID access token: signature, audience, issuer, expiry."""
+    import jwt
+
     s = get_settings()
-    jwks = PyJWKClient(f"https://login.microsoftonline.com/{s.azure_tenant_id}/discovery/v2.0/keys")
-    signing_key = jwks.get_signing_key_from_jwt(token).key
-    return jwt.decode(
-        token,
-        signing_key,
-        algorithms=["RS256"],
-        audience=s.azure_client_id,
-        issuer=f"https://login.microsoftonline.com/{s.azure_tenant_id}/v2.0",
-    )
+    try:
+        return jwt.decode(
+            token,
+            _get_signing_key(token),
+            algorithms=["RS256"],
+            audience=s.entra_audience,
+            issuer=s.entra_issuer,
+        )
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}") from exc
 
 
 # ── HR data + audit (Key Vault / downstream API + Purview in prod) ───────
