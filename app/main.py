@@ -1,45 +1,47 @@
-"""Week 11 — Enterprise Security & Compliance — starter FastAPI service.
+"""Week 11 — Enterprise Security & Compliance.
 
-Use case: HR Self-Service Agent with Least Privilege (Enterprise / Public Sector).
-See README.md for the full lab brief. Run:  uvicorn app.main:app --reload
+HR Self-Service Agent with least-privilege access, Entra ID identity (dev headers
+in mock mode), and an audit log. Run:  uvicorn app.main:app --reload
 """
 
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from fastapi import Depends, FastAPI
 
-app = FastAPI(title="Week 11 — Enterprise Security & Compliance", version="0.1.0")
+from app.service import (
+    HRRequest,
+    HRResponse,
+    Identity,
+    answer_hr,
+    audit_log,
+    get_identity,
+    get_settings,
+)
+
+settings = get_settings()
+app = FastAPI(title="Week 11 — Security (HR Least-Privilege Agent)", version="0.2.0")
 
 
-class LabRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="An employee's HR question.")
+@app.get("/health", tags=["health"])
+def health() -> dict[str, str]:
+    return {"status": "ok", "week": "11", "auth": "entra" if settings.require_auth else "dev"}
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "week": "11", "use_case": "HR Self-Service Agent with Least Privilege"}
-
-
-@app.get("/")
-def root():
+@app.get("/", tags=["root"])
+def root() -> dict[str, str]:
     return {
         "service": "agentic-ai-azure-week11-security",
-        "week": "11",
         "endpoint": "/api/v1/hr/ask",
+        "auth": "entra" if settings.require_auth else "dev",
         "docs": "/docs",
     }
 
 
-@app.post("/api/v1/hr/ask")
-def handler(payload: LabRequest):
-    """Mock handler for the HR Self-Service Agent with Least Privilege.
+@app.post("/api/v1/hr/ask", response_model=HRResponse, tags=["week11"])
+def hr_ask(payload: HRRequest, identity: Identity = Depends(get_identity)) -> HRResponse:
+    """Answer HR questions, enforcing least-privilege on whose record is read."""
+    return answer_hr(payload, identity)
 
-    TODO (lab): replace this stub with the real implementation described in
-    README.md (the Azure services for this week are listed in the Tech Stack).
-    """
-    return {
-        "week": "11",
-        "use_case": "HR Self-Service Agent with Least Privilege",
-        "received": payload.question,
-        "status": "accepted",
-        "note": "Mock response — implement the real agent per README.md.",
-    }
+
+@app.get("/api/v1/audit", tags=["week11"])
+def audit() -> dict:
+    """Audit trail of accesses (allowed and denied)."""
+    return {"audit": audit_log()}
